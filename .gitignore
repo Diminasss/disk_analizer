@@ -1,0 +1,55 @@
+# IDE settings
+.idea/
+.vscode/
+*.user
+*.user.*
+
+# CMake build trees and generated files
+build/
+build-*/
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+CTestTestfile.cmake
+Testing/
+Makefile
+compile_commands.json
+*.ninja
+.ninja_*
+
+# Compiled binaries and libraries
+*.exe
+*.dll
+*.lib
+*.a
+*.obj
+*.o
+*.pdb
+*.ilk
+*.exp
+
+# Qt generated files
+*_autogen/
+*.qm
+
+# Runtime deployment directories
+generic/
+iconengines/
+imageformats/
+networkinformation/
+platforms/
+styles/
+tls/
+translations/
+
+# Logs and temporary files
+*.log
+*.tmp
+*.bak
+*.swp
+*~
+
+# Windows metadata
+Thumbs.db
+Desktop.ini
