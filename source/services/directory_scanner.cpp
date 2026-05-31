@@ -10,7 +10,122 @@
 
 #include <algorithm>
 #include <limits>
+#include <optional>
+#include <unordered_set>
 #include <utility>
+
+#ifdef Q_OS_WIN
+namespace {
+QString extendedWindowsPath(const QString& path) {
+    QString nativePath = QDir::toNativeSeparators(path);
+    if (nativePath.startsWith(QStringLiteral("\\\\?\\"))) {
+        return nativePath;
+    }
+    if (nativePath.startsWith(QStringLiteral("\\\\"))) {
+        return QStringLiteral("\\\\?\\UNC\\") + nativePath.sliced(2);
+    }
+    return QStringLiteral("\\\\?\\") + nativePath;
+}
+
+struct WindowsFileMetadata final {
+    WindowsFileIdentity identity;
+    std::uint64_t allocatedSize{0};
+};
+
+std::optional<std::uint64_t> allocatedSizeForPath(const QString& nativePath) {
+    const HANDLE handle = CreateFileW(reinterpret_cast<LPCWSTR>(nativePath.utf16()),
+                                      FILE_READ_ATTRIBUTES,
+                                      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                      nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (handle == INVALID_HANDLE_VALUE) {
+        return std::nullopt;
+    }
+
+    FILE_STANDARD_INFO information{};
+    const bool success = GetFileInformationByHandleEx(handle, FileStandardInfo,
+                                                       &information, sizeof(information));
+    CloseHandle(handle);
+    if (!success || information.AllocationSize.QuadPart < 0) {
+        return std::nullopt;
+    }
+    return static_cast<std::uint64_t>(information.AllocationSize.QuadPart);
+}
+
+std::optional<std::uint64_t> allocatedSizeIncludingStreams(const QString& nativePath,
+                                                           const std::uint64_t fallbackSize) {
+    WIN32_FIND_STREAM_DATA streamData{};
+    const HANDLE streamHandle = FindFirstStreamW(reinterpret_cast<LPCWSTR>(nativePath.utf16()),
+                                                 FindStreamInfoStandard, &streamData, 0);
+    if (streamHandle == INVALID_HANDLE_VALUE) {
+        const DWORD error = GetLastError();
+        if (error == ERROR_HANDLE_EOF || error == ERROR_INVALID_PARAMETER
+            || error == ERROR_NOT_SUPPORTED) {
+            return fallbackSize;
+        }
+        return std::nullopt;
+    }
+
+    std::uint64_t totalSize = 0;
+    do {
+        const QString streamPath = nativePath + QString::fromWCharArray(streamData.cStreamName);
+        const std::optional<std::uint64_t> streamSize = allocatedSizeForPath(streamPath);
+        if (!streamSize) {
+            FindClose(streamHandle);
+            return std::nullopt;
+        }
+        totalSize += *streamSize;
+    } while (FindNextStreamW(streamHandle, &streamData));
+
+    const DWORD error = GetLastError();
+    FindClose(streamHandle);
+    return error == ERROR_HANDLE_EOF ? std::optional<std::uint64_t>{totalSize} : std::nullopt;
+}
+
+std::optional<WindowsFileMetadata> fileMetadata(const QString& path) {
+    const QString nativePath = extendedWindowsPath(path);
+    const HANDLE handle = CreateFileW(reinterpret_cast<LPCWSTR>(nativePath.utf16()),
+                                      FILE_READ_ATTRIBUTES,
+                                      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                      nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (handle == INVALID_HANDLE_VALUE) {
+        return std::nullopt;
+    }
+
+    BY_HANDLE_FILE_INFORMATION information{};
+    FILE_STANDARD_INFO standardInformation{};
+    if (!GetFileInformationByHandle(handle, &information)
+        || !GetFileInformationByHandleEx(handle, FileStandardInfo,
+                                         &standardInformation, sizeof(standardInformation))) {
+        CloseHandle(handle);
+        return std::nullopt;
+    }
+    CloseHandle(handle);
+
+    if (standardInformation.AllocationSize.QuadPart < 0) {
+        return std::nullopt;
+    }
+    const auto allocationSize = static_cast<std::uint64_t>(standardInformation.AllocationSize.QuadPart);
+    const std::optional<std::uint64_t> totalAllocationSize =
+        allocatedSizeIncludingStreams(nativePath, allocationSize);
+    if (!totalAllocationSize) {
+        return std::nullopt;
+    }
+
+    WindowsFileMetadata metadata;
+    metadata.identity.volumeSerialNumber = information.dwVolumeSerialNumber;
+    metadata.identity.fileIndex = (static_cast<std::uint64_t>(information.nFileIndexHigh) << 32)
+        | information.nFileIndexLow;
+    metadata.allocatedSize = *totalAllocationSize;
+    return metadata;
+}
+}
+
+std::size_t WindowsFileIdentityHash::operator()(const WindowsFileIdentity& identity) const noexcept {
+    const std::size_t first = std::hash<std::uint64_t>{}(identity.volumeSerialNumber);
+    const std::size_t second = std::hash<std::uint64_t>{}(identity.fileIndex);
+    return first ^ (second + 0x9e3779b9U + (first << 6) + (first >> 2));
+}
+#endif
 
 DirectoryScanner::DirectoryScanner(std::shared_ptr<std::atomic_bool> cancellation,
                                    ProgressCallback progressCallback)
@@ -33,7 +148,12 @@ ScanResult DirectoryScanner::scan(const QString& rootPath) const {
     const std::uint64_t totalItems = countDirectory(result.root->absolutePath);
     std::uint64_t processedItems = 0;
     reportProgress(processedItems, totalItems);
+#ifdef Q_OS_WIN
+    std::unordered_set<WindowsFileIdentity, WindowsFileIdentityHash> countedFiles;
+    result.root->sizeBytes = scanDirectory(*result.root, result, totalItems, processedItems, countedFiles);
+#else
     result.root->sizeBytes = scanDirectory(*result.root, result, totalItems, processedItems);
+#endif
     reportProgress(processedItems, totalItems);
     result.cancelled = cancellation_->load(std::memory_order_relaxed);
     return result;
@@ -100,7 +220,12 @@ std::uint64_t DirectoryScanner::countDirectory(const QString& path) const {
 
 std::uint64_t DirectoryScanner::scanDirectory(FileNode& node, ScanResult& result,
                                               const std::uint64_t totalItems,
-                                              std::uint64_t& processedItems) const {
+                                              std::uint64_t& processedItems
+#ifdef Q_OS_WIN
+                                              , std::unordered_set<WindowsFileIdentity,
+                                                                   WindowsFileIdentityHash>& countedFiles
+#endif
+                                              ) const {
     if (cancellation_->load(std::memory_order_relaxed)) {
         return 0;
     }
@@ -138,12 +263,16 @@ std::uint64_t DirectoryScanner::scanDirectory(FileNode& node, ScanResult& result
 
         const bool reparsePoint = (entry.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0;
         if (child->directory && !reparsePoint) {
-            child->sizeBytes = scanDirectory(*child, result, totalItems, processedItems);
-        } else if (!child->directory) {
-            ULARGE_INTEGER fileSize{};
-            fileSize.HighPart = entry.nFileSizeHigh;
-            fileSize.LowPart = entry.nFileSizeLow;
-            child->sizeBytes = fileSize.QuadPart;
+            child->sizeBytes = scanDirectory(*child, result, totalItems, processedItems, countedFiles);
+        } else if (!child->directory && !reparsePoint) {
+            const std::optional<WindowsFileMetadata> metadata = fileMetadata(child->absolutePath);
+            if (!metadata) {
+                ++result.inaccessibleCount;
+            } else if (!countedFiles.insert(metadata->identity).second) {
+                child->duplicateHardLink = true;
+            } else {
+                child->sizeBytes = metadata->allocatedSize;
+            }
         }
 
         totalSize += child->sizeBytes;

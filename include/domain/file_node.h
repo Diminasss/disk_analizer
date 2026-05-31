@@ -11,6 +11,7 @@ struct FileNode final {
     QString absolutePath;
     std::uint64_t sizeBytes{0};
     bool directory{false};
+    bool duplicateHardLink{false};
     FileNode* parent{nullptr};
     std::vector<std::unique_ptr<FileNode>> children;
 };

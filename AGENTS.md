@@ -27,6 +27,12 @@ Keep scan progress accurate and thread-safe. Count filesystem entries before
 the size scan, report progress from the worker through queued UI updates, and
 throttle notifications so large disks do not flood the event loop.
 
+On Windows, report allocated disk space rather than logical stream length.
+Deduplicate files by volume and file identity so NTFS hard links are charged
+only once per scan. Include allocated space for alternate NTFS streams. Mark
+duplicate hard-link nodes in the UI instead of silently charging the same
+physical blocks to multiple folders.
+
 Catch failures at application boundaries. Exceptions must not escape Qt slots,
 background tasks, or `main`. Show actionable errors to the user in a modal
 error dialog and mirror them in the status label when the main window exists.

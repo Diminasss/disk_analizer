@@ -71,7 +71,10 @@ QVariant FileTreeModel::data(const QModelIndex& index, const int role) const {
         case 1:
             return formattedSize(node->sizeBytes);
         case 2:
-            return node->directory ? tr("Папка") : tr("Файл");
+            if (node->directory) {
+                return tr("Папка");
+            }
+            return node->duplicateHardLink ? tr("Жесткая ссылка") : tr("Файл");
         default:
             return {};
         }
@@ -96,7 +99,11 @@ QVariant FileTreeModel::data(const QModelIndex& index, const int role) const {
         return maxSize == 0 ? 0.0 : static_cast<double>(node->sizeBytes) / static_cast<double>(maxSize);
     }
     if (role == Qt::ToolTipRole) {
-        return QStringLiteral("%1\n%2").arg(node->absolutePath, formattedSize(node->sizeBytes));
+        QString tooltip = QStringLiteral("%1\n%2").arg(node->absolutePath, formattedSize(node->sizeBytes));
+        if (node->duplicateHardLink) {
+            tooltip += tr("\nФизическое место уже учтено у другой жесткой ссылки");
+        }
+        return tooltip;
     }
     return {};
 }
@@ -109,7 +116,7 @@ QVariant FileTreeModel::headerData(const int section, const Qt::Orientation orie
     case 0:
         return tr("Название");
     case 1:
-        return tr("Размер");
+        return tr("Занято");
     case 2:
         return tr("Тип");
     default:
