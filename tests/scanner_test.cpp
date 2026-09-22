@@ -14,6 +14,7 @@
 
 int main() {
     QTemporaryDir temporaryDirectory;
+    
     if (!temporaryDirectory.isValid()) {
         return EXIT_FAILURE;
     }
